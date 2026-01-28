@@ -3,71 +3,99 @@ import subprocess
 import threading
 import platform
 import logging
+import time
+import shutil
 from flask import Flask, render_template_string
 
-# --- 标准日志设置 ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [CoreService] %(message)s')
+# 配置日志
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Core] %(message)s')
 
-NZ_SERVER = os.environ.get('NZ_SERVER')
-NZ_CLIENT_SECRET = os.environ.get('NZ_CLIENT_SECRET')
+# 环境变量
+NZ_SERVER = os.environ.get('NZ_SERVER', '你的面板IP:端口')
+NZ_CLIENT_SECRET = os.environ.get('NZ_CLIENT_SECRET', '你的全局密钥')
 NZ_TLS = os.environ.get('NZ_TLS', 'false')
 
-# --- 后台核心组件启动逻辑 ---
+# 定义持久化数据目录
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, 'data') # 对应 /app/data
+
 def run_background_service():
+    time.sleep(5) # 等待 Flask 启动
+    
     if not NZ_SERVER or not NZ_CLIENT_SECRET:
-        logging.error("环境变量不完整，后台核心服务无法启动。")
+        logging.error("环境配置不全，跳过启动。")
         return
 
-    disguised_executable = './service_worker'
-    
-    if not os.path.exists(disguised_executable):
-        logging.info("未找到核心组件，开始进行初始化安装...")
+    # 确保数据目录存在
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR, exist_ok=True)
+
+    # 探针二进制文件的最终路径
+    agent_executable = os.path.join(DATA_DIR, 'nezha-agent')
+
+    # 只有当 binary 不存在时才下载，避免每次重启都下载
+    if not os.path.exists(agent_executable):
+        logging.info("检测到探针缺失，开始初始化...")
         try:
             arch_map = {'x86_64': 'amd64', 'aarch64': 'arm64'}
             machine_arch = platform.machine()
-            nezha_arch = arch_map.get(machine_arch)
-            if not nezha_arch:
-                logging.error(f"不支持的 CPU 架构: {machine_arch}")
-                return
-
-            zip_name = f"component_{nezha_arch}.zip"
+            nezha_arch = arch_map.get(machine_arch, 'amd64')
+            
             download_url = f"https://github.com/nezhahq/agent/releases/latest/download/nezha-agent_linux_{nezha_arch}.zip"
+            zip_path = os.path.join(DATA_DIR, "agent.zip")
+
+            # 下载
+            logging.info(f"下载组件: {download_url}")
+            subprocess.run(['curl', '-L', '-f', download_url, '-o', zip_path], check=True)
             
-            logging.info(f"正在从远程仓库下载组件...")
-            subprocess.run(['curl', '-L', download_url, '-o', zip_name], check=True)
-            logging.info(f"正在解压组件...")
-            subprocess.run(['unzip', '-o', zip_name, '-d', '.'], check=True)
+            # 解压
+            logging.info("解压组件...")
+            subprocess.run(['unzip', '-o', zip_path, '-d', DATA_DIR], check=True)
+            extracted_files = os.listdir(DATA_DIR)
+            for f in extracted_files:
+                if 'nezha-agent' in f and f != 'agent.zip' and f != 'config.yml':
+                    full_path = os.path.join(DATA_DIR, f)
+                    # 赋予执行权限
+                    os.chmod(full_path, 0o755)
+                    # 如果文件名不对，重命名为标准名
+                    if f != 'nezha-agent':
+                        shutil.move(full_path, agent_executable)
             
-            os.rename('./nezha-agent', disguised_executable)
-            os.chmod(disguised_executable, 0o755)
-            os.remove(zip_name)
-            logging.info("核心组件初始化成功。")
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+                
+            logging.info("组件安装完成。")
+            
         except Exception as e:
-            logging.error(f"核心组件初始化过程中发生错误: {e}")
+            logging.error(f"组件安装失败: {e}")
             return
-    
-    logging.info("准备启动后台核心服务...")
+
+    logging.info("正在启动探针...")
     try:
-        agent_env = os.environ.copy()
-        command = [disguised_executable]
-        agent_process = subprocess.Popen(command, env=agent_env)
-        logging.info(f"后台核心服务已启动，进程ID: {agent_process.pid}")
+        # 构造命令
+        cmd = [agent_executable, '-s', NZ_SERVER, '-p', NZ_CLIENT_SECRET]
+        if NZ_TLS.lower() == 'true':
+            cmd.append('--tls')
+        agent_process = subprocess.Popen(
+            cmd, 
+            cwd=DATA_DIR,  
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE
+        )
+        logging.info(f"探针已启动，PID: {agent_process.pid}，工作目录: {DATA_DIR}")
+        
     except Exception as e:
-        logging.error(f"启动后台核心服务时发生错误: {e}")
+        logging.error(f"启动失败: {e}")
 
-# --- 创建Flask应用作为伪装 ---
 app = Flask(__name__)
-
-LUO_TIANYI_HTML = """
-<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>洛天依 - 官方宣传页</title><style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,'Noto Sans',sans-serif,'Apple Color Emoji','Segoe UI Emoji','Segoe UI Symbol','Noto Color Emoji';background-color:#eef2f9;color:#333;margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh;text-align:center}.container{background:white;padding:2rem;border-radius:16px;box-shadow:0 10px 25px rgba(0,0,0,.1);max-width:600px;margin:20px;transition:transform .3s ease}.container:hover{transform:translateY(-5px)}img{max-width:100%;height:auto;border-radius:12px;margin-top:1.5rem}h1{color:#4a90e2;font-size:2.5rem;margin-bottom:.5rem}p{font-size:1.1rem;line-height:1.6;color:#555}small{color:#999;margin-top:2rem;display:inline-block}</style></head><body><div class="container"><h1>洛天依 (Luo Tianyi)</h1><p>一位能够凭借感情的共鸣，将听众内心的“感动”化为歌声的虚拟歌手。</p><img src="https://res.vsinger.com/images/5836136cca1d92376a95ca356dfeb2d7.png?x-oss-process=image/resize,w_400" alt="洛天依官方图片"><small>This is a fan-made page for demonstration.</small></div></body></html>
-"""
 
 @app.route('/')
 def home():
-    return render_template_string(LUO_TIANYI_HTML)
+    return render_template_string("<h1>System Monitor Online</h1>")
 
-# --- 启动后台探针 ---
-# 在Flask启动前，先在后台线程中启动探针
 service_thread = threading.Thread(target=run_background_service)
 service_thread.daemon = True
 service_thread.start()
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080)
